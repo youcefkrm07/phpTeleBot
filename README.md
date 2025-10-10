@@ -69,13 +69,13 @@ After sending `/start`, you will see the main menu with several options:
 
 ### Decrypting Chained Properties
 
-This feature allows you to decrypt the string properties that are stored in a chain of encrypted files within the APK.
+This feature allows you to decrypt the string properties that are stored in a chain of encrypted files.
 
 1.  Press **🔓 Decrypt Chained Props**.
-2.  The bot will ask you to upload the **cloned APK file** (`.apk`).
+2.  The bot will ask you to upload a **`.zip` file** containing the encrypted property chunks.
 3.  After uploading, provide the clone's **package name**.
 4.  Finally, enter the **`clone_timestamp`**.
-5.  The bot will process the APK, find and decrypt all chained files, and send you a single, combined `.properties` file.
+5.  The bot will process the zip file, find and decrypt all chained files, and send you a single, combined `.properties` file.
 
 ### Encrypting Chained Properties
 

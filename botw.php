@@ -14,7 +14,6 @@ define('BASE_KEY_B64', 'Q29GbnBTNnV4S2pkZklPeHZhWHlLNGJ5QlBTMVdjZFU=');
 define('CHAINED_KEY_PREFIX', '584BEF6DF3297F91623E2DE659BF8D2F');
 define('CHAINED_RESOURCE_PREFIX', 'A8F5F167F44F4964E6C998DEE827110C');
 define('CHAINED_MAX_DEPTH', 50);
-define('APK_SEARCH_PREFIXES', ["res/raw/", "assets/", "com/applisto/appcloner/classes/", ""]);
 
 
 // Create state directory
@@ -313,32 +312,26 @@ function decryptAppClonerDat($encrypted_data, $clone_timestamp) {
 
 // ===== CHAINED PROPERTIES LOGIC =====
 
-function findApkEntryData($apk_path, $base_filename) {
+function findZipEntryData($zip_path, $base_filename) {
     $zip = new ZipArchive;
-    if ($zip->open($apk_path) !== TRUE) {
-        throw new Exception("Failed to open APK file: {$apk_path}");
+    if ($zip->open($zip_path) !== TRUE) {
+        throw new Exception("Failed to open ZIP file: {$zip_path}");
     }
 
     $base_filename_lower = strtolower($base_filename);
-    $search_prefixes = ["res/raw/", "assets/", "com/applisto/appcloner/classes/", ""];
 
-    foreach ($search_prefixes as $prefix) {
-        for ($i = 0; $i < $zip->numFiles; $i++) {
-            $item_name = $zip->getNameIndex($i);
-            if (substr($item_name, -1) === '/') continue;
+    for ($i = 0; $i < $zip->numFiles; $i++) {
+        $item_name = $zip->getNameIndex($i);
+        $file_info = pathinfo($item_name);
 
-            $effective_item_name = $item_name;
-            if (stripos($item_name, $prefix) === 0) {
-                $effective_item_name = substr($item_name, strlen($prefix));
-            }
-
-            if (strtolower($effective_item_name) === $base_filename_lower) {
-                $content = $zip->getFromIndex($i);
-                $zip->close();
-                return $content;
-            }
+        // Compare just the filename part
+        if (isset($file_info['filename']) && strtolower($file_info['filename']) === $base_filename_lower) {
+            $content = $zip->getFromIndex($i);
+            $zip->close();
+            return $content;
         }
     }
+
     $zip->close();
     return null;
 }
@@ -379,7 +372,7 @@ function formatPropertiesMap($props_map) {
     return $output;
 }
 
-function decryptChainedProperties($apk_path, $package_name, $clone_timestamp) {
+function decryptChainedProperties($zip_path, $package_name, $clone_timestamp) {
     try {
         $initial_key_material = CHAINED_KEY_PREFIX . $package_name . $clone_timestamp;
         $current_key_md5 = strtoupper(md5($initial_key_material));
@@ -389,10 +382,10 @@ function decryptChainedProperties($apk_path, $package_name, $clone_timestamp) {
 
         for ($i = 0; $i < CHAINED_MAX_DEPTH; $i++) {
             $resource_filename_hash = strtoupper(md5(CHAINED_RESOURCE_PREFIX . $current_key_md5));
-            $encrypted_data = findApkEntryData($apk_path, $resource_filename_hash);
+            $encrypted_data = findZipEntryData($zip_path, $resource_filename_hash);
 
             if ($encrypted_data === null || strlen($encrypted_data) === 0) {
-                if ($i === 0) throw new Exception("Initial resource file ('{$resource_filename_hash}') not found. This app may not use chained properties, or the details are incorrect.");
+                if ($i === 0) throw new Exception("Initial resource file ('{$resource_filename_hash}') not found in the zip. The zip might be incorrect or the package name/timestamp might be wrong.");
                 else break; // End of chain
             }
 
@@ -599,10 +592,10 @@ function processAppClonerDecryption($chat_id, $user_id, $encrypted_content, $tim
     clearUserState($user_id);
 }
 
-function processChainedPropertiesDecryption($chat_id, $user_id, $apk_path, $package_name, $timestamp) {
+function processChainedPropertiesDecryption($chat_id, $user_id, $zip_path, $package_name, $timestamp) {
     sendMessage($chat_id, "⏳ <b>Decrypting Chained Properties...</b>\n\nThis may take a moment. Please wait.", removeKeyboard());
 
-    $result = decryptChainedProperties($apk_path, $package_name, $timestamp);
+    $result = decryptChainedProperties($zip_path, $package_name, $timestamp);
 
     if ($result['success']) {
         $temp_file = tempnam(sys_get_temp_dir(), 'decrypted_props_') . '.properties';
@@ -625,8 +618,8 @@ function processChainedPropertiesDecryption($chat_id, $user_id, $apk_path, $pack
         sendMessage($chat_id, $message_text, mainMenuKeyboard());
     }
 
-    if (file_exists($apk_path)) {
-        unlink($apk_path);
+    if (file_exists($zip_path)) {
+        unlink($zip_path);
     }
     clearUserState($user_id);
 }
@@ -734,7 +727,7 @@ try {
 
         $message_text .= "<b>🔓 DECRYPT CHAINED PROPS:</b>\n";
         $message_text .= "1. Click 'Decrypt Chained Props'\n";
-        $message_text .= "2. Upload the cloned APK file\n";
+        $message_text .= "2. Upload a <code>.zip</code> file containing the encrypted property chunks.\n";
         $message_text .= "3. Enter the clone's package name\n";
         $message_text .= "4. Enter the clone_timestamp\n";
         $message_text .= "5. Download the decrypted .properties file\n\n";
@@ -813,10 +806,10 @@ try {
     // Handle "Decrypt Chained Props" button
     if ($text === '🔓 Decrypt Chained Props') {
         clearUserState($user_id);
-        setUserState($user_id, ['state' => 'awaiting_apk_decrypt_chained']);
+        setUserState($user_id, ['state' => 'awaiting_zip_decrypt_chained']);
 
-        $message_text = "📤 <b>Upload APK File</b>\n\n";
-        $message_text .= "Please upload your cloned <code>.apk</code> file to decrypt its chained properties.\n\n";
+        $message_text = "📤 <b>Upload ZIP File</b>\n\n";
+        $message_text .= "Please upload a <code>.zip</code> file containing the encrypted property chunks.\n\n";
         $message_text .= "Send /cancel to abort.";
 
         sendMessage($chat_id, $message_text, removeKeyboard());
@@ -978,27 +971,27 @@ try {
             clearUserState($user_id);
         }
     }
-    // Handle APK file upload for chained properties decryption
-    elseif ($state === 'awaiting_apk_decrypt_chained' && $document) {
+    // Handle ZIP file upload for chained properties decryption
+    elseif ($state === 'awaiting_zip_decrypt_chained' && $document) {
         try {
-            if ($document['mime_type'] !== 'application/vnd.android.package-archive') {
-                sendMessage($chat_id, "⚠️ <b>Invalid File Type</b>\n\nPlease upload a valid <code>.apk</code> file.", mainMenuKeyboard());
+            if ($document['mime_type'] !== 'application/zip') {
+                sendMessage($chat_id, "⚠️ <b>Invalid File Type</b>\n\nPlease upload a valid <code>.zip</code> file.", mainMenuKeyboard());
                 clearUserState($user_id);
                 exit('ok');
             }
 
-            sendMessage($chat_id, "⏳ Downloading APK...", removeKeyboard());
+            sendMessage($chat_id, "⏳ Downloading ZIP file...", removeKeyboard());
 
             $file_content = downloadFile($document['file_id']);
-            $temp_apk_path = tempnam(sys_get_temp_dir(), 'user_apk_') . '.apk';
-            file_put_contents($temp_apk_path, $file_content);
+            $temp_zip_path = tempnam(sys_get_temp_dir(), 'user_zip_') . '.zip';
+            file_put_contents($temp_zip_path, $file_content);
 
             setUserState($user_id, [
                 'state' => 'awaiting_package_decrypt_chained',
-                'apk_path' => $temp_apk_path
+                'zip_path' => $temp_zip_path
             ]);
 
-            $message_text = "✅ <b>APK received!</b>\n\n";
+            $message_text = "✅ <b>ZIP received!</b>\n\n";
             $message_text .= "📦 Now enter the <b>package name</b> of the cloned app.\n\n";
             $message_text .= "<b>Examples:</b>\n";
             $message_text .= "• <code>com.whatsapp.clone</code>\n";
@@ -1103,15 +1096,15 @@ try {
         if (empty($timestamp) || !is_numeric($timestamp)) {
             sendMessage($chat_id, "❌ <b>Invalid timestamp.</b> It must be a number. Please try again.");
         } else {
-            $apk_path = $user_state['apk_path'] ?? '';
+            $zip_path = $user_state['zip_path'] ?? '';
             $package_name = $user_state['package_name'] ?? '';
 
-            if (file_exists($apk_path) && !empty($package_name)) {
-                processChainedPropertiesDecryption($chat_id, $user_id, $apk_path, $package_name, $timestamp);
+            if (file_exists($zip_path) && !empty($package_name)) {
+                processChainedPropertiesDecryption($chat_id, $user_id, $zip_path, $package_name, $timestamp);
             } else {
-                sendMessage($chat_id, "❌ Error: Missing APK file or package name. Please /start over.", mainMenuKeyboard());
-                if(isset($user_state['apk_path']) && file_exists($user_state['apk_path'])) {
-                    unlink($user_state['apk_path']);
+                sendMessage($chat_id, "❌ Error: Missing ZIP file or package name. Please /start over.", mainMenuKeyboard());
+                if(isset($user_state['zip_path']) && file_exists($user_state['zip_path'])) {
+                    unlink($user_state['zip_path']);
                 }
                 clearUserState($user_id);
             }
