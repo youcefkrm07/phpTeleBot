@@ -41,17 +41,29 @@ Once the bot is running, you can start interacting with it in your Telegram clie
 
 After sending `/start`, you will see the main menu with several options:
 
--   `🔓 Decrypt Settings`
+-   `🔓 Decrypt Settings (Legacy)`
+-   `🔓 Decrypt Settings (Chunks)`
 -   `🔒 Encrypt Settings`
 -   `📦 Decrypt AppCloner.dat`
 -   `🔓 Decrypt Chained Props`
 -   `🔒 Encrypt Chained Props`
 
-### Decrypting `cloneSettings.json`
+### Decrypting Settings (from Chunks)
 
-1.  Press **🔓 Decrypt Settings**.
+This is the recommended method for decrypting `cloneSettings.json`. It works by assembling encrypted chunks from a `.zip` file.
+
+1.  Press **🔓 Decrypt Settings (Chunks)**.
+2.  Upload a `.zip` file containing the encrypted chunks (e.g., `config.bin` or files with MD5-style names).
+3.  Provide the app's **package name**.
+4.  The bot will find the files, assemble them, and try to decrypt them with both dynamic and fixed keys, then send back the decrypted `cloneSettings.json` file.
+
+### Decrypting Settings (Legacy)
+
+This method is for decrypting a single, already-assembled `cloneSettings.json` file.
+
+1.  Press **🔓 Decrypt Settings (Legacy)**.
 2.  The bot will ask you to upload your encrypted `cloneSettings.json` file.
-3.  After uploading, the bot will ask for the app's **package name** (e.g., `com.whatsapp`). This is case-sensitive.
+3.  After uploading, the bot will ask for the app's **package name**.
 4.  If the package name is correct, the bot will send back the decrypted and formatted `.json` file.
 
 ### Encrypting `cloneSettings.json`
