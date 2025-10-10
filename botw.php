@@ -232,28 +232,21 @@ function encryptCloneSettings($json_content, $package_name) {
 // ===== APPCLONER.DAT DECRYPTION LOGIC =====
 function deriveAppClonerKey($clone_timestamp) {
     try {
-        // Decode base key
-        $base_key_bytes = base64_decode(BASE_KEY_B64);
-        if ($base_key_bytes === false) {
-            throw new Exception("Failed to decode base key");
+        $base_key = "CoFnpS6uxKjdfIOxvaXyK4byBPS1WcdU";
+        $timestamp_str = (string)$clone_timestamp;
+        
+        // Create the modified key string
+        $modified_key_str = $timestamp_str . substr($base_key, strlen($timestamp_str));
+        
+        // The key is the first 16 bytes of the UTF-8 encoded string
+        $key = substr($modified_key_str, 0, 16);
+        
+        if (strlen($key) < 16) {
+             throw new Exception("Key derivation resulted in a key shorter than 16 bytes.");
         }
-        
-        // Convert to string
-        $base_key_str = $base_key_bytes;
-        
-        // Create mutable key by replacing beginning with timestamp
-        $key_builder = str_split($base_key_str);
-        $timestamp_chars = str_split($clone_timestamp);
-        
-        $replace_len = min(count($key_builder), count($timestamp_chars));
-        for ($i = 0; $i < $replace_len; $i++) {
-            $key_builder[$i] = $timestamp_chars[$i];
-        }
-        
-        $final_key_str = implode('', $key_builder);
-        
-        return $final_key_str;
-        
+
+        return $key;
+
     } catch (Exception $e) {
         throw new Exception("Key derivation failed: " . $e->getMessage());
     }
@@ -273,10 +266,10 @@ function decryptAppClonerDat($encrypted_data, $clone_timestamp) {
         // Derive the decryption key
         $key = deriveAppClonerKey($clone_timestamp);
         
-        // Decrypt using AES-256-ECB. PHP's openssl_decrypt handles PKCS7 padding by default.
+        // Decrypt using AES-128-ECB.
         $decrypted = openssl_decrypt(
             $encrypted_data,
-            'aes-256-ecb',
+            'aes-128-ecb',
             $key,
             OPENSSL_RAW_DATA
         );
