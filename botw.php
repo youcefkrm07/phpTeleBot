@@ -5,7 +5,7 @@ error_reporting(E_ALL);
 ini_set('display_errors', 0);
 ini_set('log_errors', 1);
 
-define('BOT_TOKEN', '8345608163:AAFAAfdBS0Q8Qj-KupZ7ON1tkDAl1SuGudE');
+define('BOT_TOKEN', 'YOUR_TELEGRAM_BOT_TOKEN_HERE');
 define('API_URL', 'https://api.telegram.org/bot' . BOT_TOKEN);
 define('STATE_DIR', sys_get_temp_dir() . '/bot_states');
 
