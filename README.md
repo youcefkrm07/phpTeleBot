@@ -43,6 +43,7 @@ After sending `/start`, you will see the main menu with several options:
 
 -   `🔓 Decrypt Settings (Legacy)`
 -   `🔓 Decrypt Settings (Chunks)`
+-   `🔒 Encrypt Settings (to Chunks)`
 -   `🔒 Encrypt Settings`
 -   `📦 Decrypt AppCloner.dat`
 -   `🔓 Decrypt Chained Props`
@@ -65,6 +66,16 @@ This method is for decrypting a single, already-assembled `cloneSettings.json` f
 2.  The bot will ask you to upload your encrypted `cloneSettings.json` file.
 3.  After uploading, the bot will ask for the app's **package name**.
 4.  If the package name is correct, the bot will send back the decrypted and formatted `.json` file.
+
+### Encrypting Settings (to Chunks)
+
+This encrypts a `cloneSettings.json` file into a `config.bin` file, ready to be zipped and placed in an APK.
+
+1.  Press **🔒 Encrypt Settings (to Chunks)**.
+2.  Upload your decrypted `cloneSettings.json` file.
+3.  Provide the app's **package name**.
+4.  Choose the encryption method: **Dynamic** (recommended) or **Fixed** (for legacy use).
+5.  The bot will send back a `.zip` file containing the encrypted `assets/config.bin`.
 
 ### Encrypting `cloneSettings.json`
 

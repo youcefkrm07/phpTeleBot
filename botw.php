@@ -124,7 +124,7 @@ function mainMenuKeyboard() {
         'keyboard' => [
             [['text' => '🔓 Decrypt Settings (Legacy)'], ['text' => '🔒 Encrypt Settings']],
             [['text' => '📦 Decrypt AppCloner.dat']],
-            [['text' => '🔓 Decrypt Settings (Chunks)']],
+            [['text' => '🔓 Decrypt Settings (Chunks)'], ['text' => '🔒 Encrypt Settings (to Chunks)']],
             [['text' => '🔓 Decrypt Chained Props'], ['text' => '🔒 Encrypt Chained Props']],
             [['text' => '❓ Help']]
         ],
@@ -417,6 +417,36 @@ function decryptCloneSettingsFromChunks($zip_path, $package_name) {
 function is_valid_json($string) {
     json_decode($string);
     return (json_last_error() == JSON_ERROR_NONE);
+}
+
+function encryptCloneSettingsToBin($json_content, $package_name, $method) {
+    try {
+        if (!is_valid_json($json_content)) {
+            throw new Exception("Invalid JSON content provided.");
+        }
+
+        $key = null;
+        if ($method === 'dynamic') {
+            $dynamic_key_material = $package_name . SETTINGS_KEY_SUFFIX;
+            $key = md5($dynamic_key_material, true); // 16 bytes raw
+        } elseif ($method === 'fixed') {
+            $key = SETTINGS_FIXED_KEY; // 16 bytes raw
+        } else {
+            throw new Exception("Invalid encryption method specified.");
+        }
+
+        $encrypted_bytes = openssl_encrypt($json_content, 'aes-128-ecb', $key, OPENSSL_RAW_DATA);
+        if ($encrypted_bytes === false) {
+            throw new Exception("AES-128-ECB encryption failed.");
+        }
+
+        $encrypted_base64 = base64_encode($encrypted_bytes);
+
+        return ['success' => true, 'data' => $encrypted_base64];
+
+    } catch (Exception $e) {
+        return ['success' => false, 'error' => $e->getMessage()];
+    }
 }
 
 
@@ -770,6 +800,45 @@ function processSettingsDecryptionFromChunks($chat_id, $user_id, $zip_path, $pac
     clearUserState($user_id);
 }
 
+function processSettingsEncryptionToChunks($chat_id, $user_id, $json_content, $package_name, $method) {
+    sendMessage($chat_id, "⏳ <b>Encrypting Settings to Chunks...</b>\n\nPlease wait.", removeKeyboard());
+
+    $result = encryptCloneSettingsToBin($json_content, $package_name, $method);
+
+    if ($result['success']) {
+        $zip_path = tempnam(sys_get_temp_dir(), 'encrypted_settings_') . '.zip';
+        $zip = new ZipArchive;
+        if ($zip->open($zip_path, ZipArchive::CREATE) !== TRUE) {
+            sendMessage($chat_id, "❌ Error: Could not create the output zip file.", mainMenuKeyboard());
+            clearUserState($user_id);
+            return;
+        }
+
+        $zip->addFromString('assets/config.bin', $result['data']);
+        $zip->close();
+
+        $caption = "✅ <b>Settings Encryption Successful!</b>\n\n";
+        $caption .= "📦 <b>Package:</b> <code>{$package_name}</code>\n";
+        $caption .= "🔑 <b>Method:</b> " . ucfirst($method) . " Key\n";
+        $caption .= "🗂️ <b>File Created:</b> <code>config.bin</code>\n\n";
+        $caption .= "Add this file to your APK's <code>assets</code> directory.";
+
+        sendDocument($chat_id, $zip_path, $caption);
+        sendMessage($chat_id, "✨ Ready for next operation!", mainMenuKeyboard());
+
+        unlink($zip_path);
+
+    } else {
+        $message_text = "❌ <b>Encryption Failed</b>\n\n";
+        $message_text .= "📛 <b>Error:</b> " . htmlspecialchars($result['error']) . "\n\n";
+        $message_text .= "Please check your file and try again.";
+
+        sendMessage($chat_id, $message_text, mainMenuKeyboard());
+    }
+
+    clearUserState($user_id);
+}
+
 function processChainedPropertiesEncryption($chat_id, $user_id, $properties_content, $package_name, $timestamp) {
     sendMessage($chat_id, "⏳ <b>Encrypting Chained Properties...</b>\n\nThis will create 25 encrypted files. Please wait.", removeKeyboard());
 
@@ -820,14 +889,23 @@ try {
     }
     
     $message = $update['message'] ?? null;
-    if (!$message) {
-        exit('no message');
+    $callback_query = $update['callback_query'] ?? null;
+
+    if (!$message && !$callback_query) {
+        exit('no message or callback');
     }
-    
-    $chat_id = $message['chat']['id'];
-    $user_id = $message['from']['id'];
-    $text = $message['text'] ?? '';
-    $document = $message['document'] ?? null;
+
+    if ($callback_query) {
+        $chat_id = $callback_query['message']['chat']['id'];
+        $user_id = $callback_query['from']['id'];
+        $data = $callback_query['data'];
+        $text = ''; // No text for callbacks
+    } else {
+        $chat_id = $message['chat']['id'];
+        $user_id = $message['from']['id'];
+        $text = $message['text'] ?? '';
+        $document = $message['document'] ?? null;
+    }
     
     $user_state = getUserState($user_id);
     $state = $user_state['state'] ?? 'idle';
@@ -934,6 +1012,19 @@ try {
 
         $message_text = "📤 <b>Upload ZIP File</b>\n\n";
         $message_text .= "Please upload a <code>.zip</code> file containing your encrypted setting chunks (e.g., config.bin or MD5-named files).\n\n";
+        $message_text .= "Send /cancel to abort.";
+
+        sendMessage($chat_id, $message_text, removeKeyboard());
+        exit('ok');
+    }
+
+    // Handle "Encrypt Settings (to Chunks)" button
+    if ($text === '🔒 Encrypt Settings (to Chunks)') {
+        clearUserState($user_id);
+        setUserState($user_id, ['state' => 'awaiting_file_encrypt_settings_chunks']);
+
+        $message_text = "📤 <b>Upload JSON File</b>\n\n";
+        $message_text .= "Please upload your decrypted <code>cloneSettings.json</code> file.\n\n";
         $message_text .= "Send /cancel to abort.";
 
         sendMessage($chat_id, $message_text, removeKeyboard());
@@ -1194,6 +1285,28 @@ try {
             clearUserState($user_id);
         }
     }
+    // Handle file upload for settings chunks encryption
+    elseif ($state === 'awaiting_file_encrypt_settings_chunks' && $document) {
+        try {
+            sendMessage($chat_id, "⏳ Downloading JSON file...", removeKeyboard());
+            $file_content = downloadFile($document['file_id']);
+            if (!is_valid_json($file_content)) {
+                sendMessage($chat_id, "❌ <b>Invalid JSON File</b>\n\nThe file you uploaded does not contain valid JSON. Please try again.", mainMenuKeyboard());
+                clearUserState($user_id);
+                exit('ok');
+            }
+            setUserState($user_id, [
+                'state' => 'awaiting_package_encrypt_settings_chunks',
+                'json_content' => $file_content
+            ]);
+            $message_text = "✅ <b>JSON file received!</b>\n\n";
+            $message_text .= "📦 Now enter the <b>package name</b> for the clone.";
+            sendMessage($chat_id, $message_text, removeKeyboard());
+        } catch (Exception $e) {
+            sendMessage($chat_id, "❌ <b>Error processing file:</b>\n\n" . htmlspecialchars($e->getMessage()), mainMenuKeyboard());
+            clearUserState($user_id);
+        }
+    }
     // Handle props file upload for chained properties encryption
     elseif ($state === 'awaiting_props_file_encrypt_chained' && $document) {
         try {
@@ -1312,6 +1425,41 @@ try {
                 sendMessage($chat_id, "❌ Error: Missing ZIP file. Please /start over.", mainMenuKeyboard());
                 clearUserState($user_id);
             }
+        }
+    }
+    // Handle package name for settings chunks encryption
+    elseif ($state === 'awaiting_package_encrypt_settings_chunks') {
+        $package = trim($text);
+        if (strlen($package) < 3 || !preg_match('/^[a-zA-Z0-9._]+$/', $package)) {
+            sendMessage($chat_id, "❌ <b>Invalid package name format.</b> Please try again.");
+        } else {
+            $user_state['state'] = 'awaiting_method_encrypt_settings_chunks';
+            $user_state['package_name'] = $package;
+            setUserState($user_id, $user_state);
+
+            $message_text = "✅ <b>Package name set!</b>\n\n";
+            $message_text .= "🔑 Now choose the encryption key method:";
+            $keyboard = json_encode([
+                'inline_keyboard' => [
+                    [['text' => 'Dynamic Key (Recommended)', 'callback_data' => 'encrypt_settings_dynamic']],
+                    [['text' => 'Fixed Key (Legacy)', 'callback_data' => 'encrypt_settings_fixed']]
+                ]
+            ]);
+            sendMessage($chat_id, $message_text, $keyboard);
+        }
+    }
+    // Handle method selection for settings chunk encryption
+    elseif ($state === 'awaiting_method_encrypt_settings_chunks' && $callback_query) {
+        $method = (str_contains($data, 'dynamic')) ? 'dynamic' : 'fixed';
+
+        $json_content = $user_state['json_content'] ?? '';
+        $package_name = $user_state['package_name'] ?? '';
+
+        if (!empty($json_content) && !empty($package_name)) {
+            processSettingsEncryptionToChunks($chat_id, $user_id, $json_content, $package_name, $method);
+        } else {
+            sendMessage($chat_id, "❌ Error: Missing JSON content or package name. Please /start over.", mainMenuKeyboard());
+            clearUserState($user_id);
         }
     }
     // Handle package name for chained props encryption
