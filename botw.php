@@ -9,8 +9,17 @@ define('BOT_TOKEN', 'YOUR_TELEGRAM_BOT_TOKEN_HERE');
 define('API_URL', 'https://api.telegram.org/bot' . BOT_TOKEN);
 define('STATE_DIR', sys_get_temp_dir() . '/bot_states');
 
-// App Cloner constant
+// --- App Cloner Constants ---
 define('BASE_KEY_B64', 'Q29GbnBTNnV4S2pkZklPeHZhWHlLNGJ5QlBTMVdjZFU=');
+define('CHAINED_KEY_PREFIX', '584BEF6DF3297F91623E2DE659BF8D2F');
+define('CHAINED_RESOURCE_PREFIX', 'A8F5F167F44F4964E6C998DEE827110C');
+define('CHAINED_MAX_DEPTH', 50);
+
+// Constants for new cloneSettings decryption
+define('SETTINGS_KEY_SUFFIX', '/I am the one who knocks!');
+define('SETTINGS_FILENAME_PREFIX', "I'll be back.");
+define('SETTINGS_FIXED_KEY', 'UYGy723!Po-efjve');
+
 
 // Create state directory
 if (!is_dir(STATE_DIR)) {
@@ -66,7 +75,8 @@ function sendDocument($chat_id, $file_path, $caption = '') {
     $data = [
         'chat_id' => $chat_id,
         'document' => new CURLFile($file_path),
-        'caption' => $caption
+        'caption' => $caption,
+        'parse_mode' => 'HTML'
     ];
     
     $ch = curl_init(API_URL . '/sendDocument');
@@ -113,8 +123,10 @@ function removeKeyboard() {
 function mainMenuKeyboard() {
     return json_encode([
         'keyboard' => [
-            [['text' => '🔓 Decrypt Settings'], ['text' => '🔒 Encrypt Settings']],
+            [['text' => '🔓 Decrypt Settings (Legacy)'], ['text' => '🔒 Encrypt Settings']],
             [['text' => '📦 Decrypt AppCloner.dat']],
+            [['text' => '🔓 Decrypt Settings (Chunks)'], ['text' => '🔒 Encrypt Settings (to Chunks)']],
+            [['text' => '🔓 Decrypt Chained Props'], ['text' => '🔒 Encrypt Chained Props']],
             [['text' => '❓ Help']]
         ],
         'resize_keyboard' => true,
@@ -305,6 +317,324 @@ function decryptAppClonerDat($encrypted_data, $clone_timestamp) {
     }
 }
 
+// ===== CLONE SETTINGS FROM CHUNKS LOGIC =====
+
+function generateSettingsFilename($package_name, $index) {
+    $name_string = $package_name . SETTINGS_FILENAME_PREFIX . $index;
+    return strtoupper(md5($name_string));
+}
+
+function assembleEncryptedDataFromZip($zip_path, $package_name) {
+    $zip = new ZipArchive;
+    if ($zip->open($zip_path) !== TRUE) {
+        throw new Exception("Failed to open ZIP file for assembly.");
+    }
+
+    $assembled_data = "";
+    $file_count = 0;
+    $index = 0;
+
+    // Look for split files with MD5 name pattern
+    while (true) {
+        $resource_name = generateSettingsFilename($package_name, $index);
+        $content = $zip->getFromName($resource_name);
+
+        if ($content !== false) {
+            $assembled_data .= $content;
+            $file_count++;
+            $index++;
+        } else {
+            // Fallback for lowercase filenames
+            $content_lower = $zip->getFromName(strtolower($resource_name));
+            if ($content_lower !== false) {
+                $assembled_data .= $content_lower;
+                $file_count++;
+                $index++;
+                continue;
+            }
+            break; // Stop when next file in sequence is not found
+        }
+    }
+
+    // If no split files were found, check for single config files
+    if ($file_count === 0) {
+        $single_files = ["config.bin", "settings.bin", "config.dat"];
+        foreach ($single_files as $filename) {
+            $content = $zip->getFromName($filename);
+            if ($content !== false) {
+                $assembled_data = $content;
+                $file_count = 1;
+                break;
+            }
+        }
+    }
+
+    $zip->close();
+    return ['data' => $assembled_data, 'count' => $file_count];
+}
+
+function decryptCloneSettingsFromChunks($zip_path, $package_name) {
+    try {
+        // 1. Assemble data from zip
+        $assembly = assembleEncryptedDataFromZip($zip_path, $package_name);
+        if ($assembly['count'] === 0) {
+            throw new Exception("No encrypted setting files (e.g., config.bin, or MD5-named chunks) found in the zip.");
+        }
+        $encrypted_base64 = $assembly['data'];
+
+        // 2. Prepare keys
+        $dynamic_key_material = $package_name . SETTINGS_KEY_SUFFIX;
+        $dynamic_key = md5($dynamic_key_material, true); // 16 bytes raw
+        $fixed_key = SETTINGS_FIXED_KEY; // 16 bytes raw
+
+        // 3. Attempt decryption
+        $encrypted_bytes = base64_decode($encrypted_base64);
+        if ($encrypted_bytes === false) {
+            throw new Exception("Failed to base64 decode the assembled data.");
+        }
+
+        // Try dynamic key first
+        $decrypted_bytes = openssl_decrypt($encrypted_bytes, 'aes-128-ecb', $dynamic_key, OPENSSL_RAW_DATA);
+        $method = "dynamic";
+
+        // If dynamic fails, try fixed key
+        if ($decrypted_bytes === false || !is_valid_json($decrypted_bytes)) {
+            $decrypted_bytes = openssl_decrypt($encrypted_bytes, 'aes-128-ecb', $fixed_key, OPENSSL_RAW_DATA);
+            $method = "fixed";
+        }
+
+        // Final check
+        if ($decrypted_bytes === false || !is_valid_json($decrypted_bytes)) {
+            throw new Exception("Decryption failed with both dynamic and fixed keys. Check package name.");
+        }
+
+        return ['success' => true, 'data' => $decrypted_bytes, 'method' => $method, 'file_count' => $assembly['count']];
+
+    } catch (Exception $e) {
+        return ['success' => false, 'error' => $e->getMessage()];
+    }
+}
+
+function is_valid_json($string) {
+    json_decode($string);
+    return (json_last_error() == JSON_ERROR_NONE);
+}
+
+function encryptSettingsToMD5Chunks($json_content, $package_name, $method, $num_chunks = 1) {
+    try {
+        if (!is_valid_json($json_content)) {
+            throw new Exception("Invalid JSON content provided.");
+        }
+        if ($num_chunks < 1) {
+            throw new Exception("Number of chunks must be at least 1.");
+        }
+
+        $key = null;
+        if ($method === 'dynamic') {
+            $dynamic_key_material = $package_name . SETTINGS_KEY_SUFFIX;
+            $key = md5($dynamic_key_material, true);
+        } elseif ($method === 'fixed') {
+            $key = SETTINGS_FIXED_KEY;
+        } else {
+            throw new Exception("Invalid encryption method specified.");
+        }
+
+        $encrypted_bytes = openssl_encrypt($json_content, 'aes-128-ecb', $key, OPENSSL_RAW_DATA);
+        if ($encrypted_bytes === false) {
+            throw new Exception("AES-128-ECB encryption failed.");
+        }
+
+        $encrypted_base64 = base64_encode($encrypted_bytes);
+        $total_len = strlen($encrypted_base64);
+
+        // Split the base64 string into a specific number of chunks
+        $base_chunk_size = floor($total_len / $num_chunks);
+        $remainder = $total_len % $num_chunks;
+        $files = [];
+        $offset = 0;
+
+        for ($i = 0; $i < $num_chunks; $i++) {
+            $chunk_size = $base_chunk_size + ($i < $remainder ? 1 : 0);
+            $chunk_content = substr($encrypted_base64, $offset, $chunk_size);
+            $filename = generateSettingsFilename($package_name, $i);
+            $files[$filename] = $chunk_content;
+            $offset += $chunk_size;
+        }
+
+        return ['success' => true, 'files' => $files];
+
+    } catch (Exception $e) {
+        return ['success' => false, 'error' => $e->getMessage()];
+    }
+}
+
+
+// ===== CHAINED PROPERTIES LOGIC =====
+
+function findZipEntryData($zip_path, $base_filename) {
+    $zip = new ZipArchive;
+    if ($zip->open($zip_path) !== TRUE) {
+        throw new Exception("Failed to open ZIP file: {$zip_path}");
+    }
+
+    $base_filename_lower = strtolower($base_filename);
+
+    for ($i = 0; $i < $zip->numFiles; $i++) {
+        $item_name = $zip->getNameIndex($i);
+        $file_info = pathinfo($item_name);
+
+        // Compare just the filename part
+        if (isset($file_info['filename']) && strtolower($file_info['filename']) === $base_filename_lower) {
+            $content = $zip->getFromIndex($i);
+            $zip->close();
+            return $content;
+        }
+    }
+
+    $zip->close();
+    return null;
+}
+
+function parseProperties($data_bytes) {
+    $properties = [];
+    $lines = explode("\n", $data_bytes);
+    foreach ($lines as $line) {
+        $line = trim($line);
+        if (empty($line) || strpos($line, '#') === 0 || strpos($line, ';') === 0) {
+            continue;
+        }
+
+        if (strpos($line, '=') !== false) {
+            list($key, $value) = explode('=', $line, 2);
+            $key = trim(str_replace(['\=', '\:'], ['=', ':'], $key));
+            $value = trim(str_replace('\n', "\n", $value));
+            if (!empty($key)) {
+                $properties[$key] = $value;
+            }
+        }
+    }
+    return $properties;
+}
+
+function formatPropertiesMap($props_map) {
+    $now = new DateTime('now', new DateTimeZone('UTC'));
+    $header_ts = $now->format('Y-m-d H:i:s T');
+    $output = "#Props - {$header_ts}\n";
+    $output .= "#Total: " . count($props_map) . "\n";
+
+    ksort($props_map);
+    foreach ($props_map as $key => $value) {
+        $key = str_replace(['=', ':'], ['\=', '\:'], $key);
+        $value = str_replace("\n", '\n', $value);
+        $output .= "{$key}={$value}\n";
+    }
+    return $output;
+}
+
+function decryptChainedProperties($zip_path, $package_name, $clone_timestamp) {
+    try {
+        $initial_key_material = CHAINED_KEY_PREFIX . $package_name . $clone_timestamp;
+        $current_key_md5 = strtoupper(md5($initial_key_material));
+
+        $all_decrypted_properties = [];
+        $files_processed = 0;
+
+        for ($i = 0; $i < CHAINED_MAX_DEPTH; $i++) {
+            $resource_filename_hash = strtoupper(md5(CHAINED_RESOURCE_PREFIX . $current_key_md5));
+            $encrypted_data = findZipEntryData($zip_path, $resource_filename_hash);
+
+            if ($encrypted_data === null || strlen($encrypted_data) === 0) {
+                if ($i === 0) throw new Exception("Initial resource file ('{$resource_filename_hash}') not found in the zip. The zip might be incorrect or the package name/timestamp might be wrong.");
+                else break; // End of chain
+            }
+
+            $files_processed++;
+            // The key is the 32-byte hex string itself.
+            $aes_key = $current_key_md5;
+
+            // A 32-byte key requires AES-256.
+            $decrypted_bytes = openssl_decrypt($encrypted_data, 'aes-256-ecb', $aes_key, OPENSSL_RAW_DATA);
+
+            if ($decrypted_bytes === false) {
+                 throw new Exception("Decryption failed for resource '{$resource_filename_hash}'. Usually means a wrong package name or timestamp.");
+            }
+
+            $properties_chunk = parseProperties($decrypted_bytes);
+            if (!empty($properties_chunk)) {
+                $all_decrypted_properties = array_merge($all_decrypted_properties, $properties_chunk);
+            }
+            $current_key_md5 = $resource_filename_hash;
+        }
+
+        if (empty($all_decrypted_properties) && $files_processed === 0) {
+            throw new Exception("No chained properties files were found or processed.");
+        }
+
+        return ['success' => true, 'data' => formatPropertiesMap($all_decrypted_properties), 'count' => count($all_decrypted_properties)];
+    } catch (Exception $e) {
+        return ['success' => false, 'error' => $e->getMessage()];
+    }
+}
+
+function encryptChainedProperties($properties_content, $package_name, $clone_timestamp) {
+    try {
+        $source_properties_map = parseProperties($properties_content);
+        if ($source_properties_map === null) {
+            throw new Exception("Failed to parse source properties file.");
+        }
+
+        $all_props_list = [];
+        foreach ($source_properties_map as $key => $value) {
+            $all_props_list[] = [$key, $value];
+        }
+        usort($all_props_list, function($a, $b) { return strcmp($a[0], $b[0]); });
+
+        $total_props = count($all_props_list);
+        $num_chunks = 25;
+
+        $chunks_of_property_maps = [];
+
+        if ($total_props > 0) {
+            $base_size = floor($total_props / $num_chunks);
+            $remainder = $total_props % $num_chunks;
+            $current_idx = 0;
+            for ($i = 0; $i < $num_chunks; $i++) {
+                $chunk_size = $base_size + ($i < $remainder ? 1 : 0);
+                $chunk_items = array_slice($all_props_list, $current_idx, $chunk_size);
+                $chunk_dict = [];
+                foreach ($chunk_items as $item) { $chunk_dict[$item[0]] = $item[1]; }
+                $chunks_of_property_maps[] = $chunk_dict;
+                $current_idx += $chunk_size;
+            }
+        } else {
+            for ($i = 0; $i < $num_chunks; $i++) { $chunks_of_property_maps[] = []; }
+        }
+
+        $initial_key_material = CHAINED_KEY_PREFIX . $package_name . $clone_timestamp;
+        $current_key_md5 = strtoupper(md5($initial_key_material));
+        $encrypted_files = [];
+
+        foreach ($chunks_of_property_maps as $chunk_map) {
+            $plain_text = formatPropertiesMap($chunk_map);
+            // The key is the 32-byte hex string itself.
+            $aes_key = $current_key_md5;
+            // A 32-byte key requires AES-256.
+            $encrypted_bytes = openssl_encrypt($plain_text, 'aes-256-ecb', $aes_key, OPENSSL_RAW_DATA);
+
+            if ($encrypted_bytes === false) throw new Exception("Chunk encryption failed.");
+
+            $filename = strtoupper(md5(CHAINED_RESOURCE_PREFIX . $current_key_md5));
+            $encrypted_files[$filename] = $encrypted_bytes;
+            $current_key_md5 = $filename;
+        }
+
+        return ['success' => true, 'files' => $encrypted_files];
+    } catch (Exception $e) {
+        return ['success' => false, 'error' => $e->getMessage()];
+    }
+}
+
+
 // ===== PROCESSING FUNCTIONS =====
 function processSettingsDecryption($chat_id, $user_id, $encrypted_content, $package) {
     sendMessage($chat_id, "⏳ <b>Decrypting...</b>\n\nPlease wait...", removeKeyboard());
@@ -421,6 +751,163 @@ function processAppClonerDecryption($chat_id, $user_id, $encrypted_content, $tim
     clearUserState($user_id);
 }
 
+function processChainedPropertiesDecryption($chat_id, $user_id, $zip_path, $package_name, $timestamp) {
+    sendMessage($chat_id, "⏳ <b>Decrypting Chained Properties...</b>\n\nThis may take a moment. Please wait.", removeKeyboard());
+
+    $result = decryptChainedProperties($zip_path, $package_name, $timestamp);
+
+    if ($result['success']) {
+        $temp_file = tempnam(sys_get_temp_dir(), 'decrypted_props_') . '.properties';
+        file_put_contents($temp_file, $result['data']);
+
+        $message_text = "✅ <b>Chained Properties Decryption Successful!</b>\n\n";
+        $message_text .= "📦 <b>Package:</b> <code>{$package_name}</code>\n";
+        $message_text .= "🕐 <b>Timestamp:</b> <code>{$timestamp}</code>\n";
+        $message_text .= "🔑 <b>Properties Found:</b> " . $result['count'] . "\n";
+
+        sendDocument($chat_id, $temp_file, $message_text);
+        sendMessage($chat_id, "✨ Ready for next operation!", mainMenuKeyboard());
+
+        unlink($temp_file);
+    } else {
+        $message_text = "❌ <b>Decryption Failed</b>\n\n";
+        $message_text .= "📛 <b>Error:</b> " . htmlspecialchars($result['error']) . "\n\n";
+        $message_text .= "Please try again with correct details.";
+
+        sendMessage($chat_id, $message_text, mainMenuKeyboard());
+    }
+
+    if (file_exists($zip_path)) {
+        unlink($zip_path);
+    }
+    clearUserState($user_id);
+}
+
+function processSettingsDecryptionFromChunks($chat_id, $user_id, $zip_path, $package_name) {
+    sendMessage($chat_id, "⏳ <b>Decrypting Settings from Chunks...</b>\n\nAssembling and decrypting. Please wait.", removeKeyboard());
+
+    $result = decryptCloneSettingsFromChunks($zip_path, $package_name);
+
+    if ($result['success']) {
+        // Save the chunk count for the next encryption
+        $user_state = getUserState($user_id);
+        $user_state['last_settings_chunk_count'] = $result['file_count'];
+        setUserState($user_id, $user_state);
+
+        $temp_file = tempnam(sys_get_temp_dir(), 'decrypted_settings_') . '.json';
+
+        // Format JSON nicely
+        $json_obj = json_decode($result['data']);
+        $pretty_json = json_encode($json_obj, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+        file_put_contents($temp_file, $pretty_json);
+
+        $message_text = "✅ <b>Settings Decryption Successful!</b>\n\n";
+        $message_text .= "📦 <b>Package:</b> <code>{$package_name}</code>\n";
+        $message_text .= "🔑 <b>Method:</b> " . ucfirst($result['method']) . " Key\n";
+        $message_text .= "🗂️ <b>Files Assembled:</b> " . $result['file_count'] . "\n\n";
+        $message_text .= "ℹ️ The chunk count (<b>" . $result['file_count'] . "</b>) has been saved for your next encryption operation.";
+
+        sendDocument($chat_id, $temp_file, $message_text);
+        sendMessage($chat_id, "✨ Ready for next operation!", mainMenuKeyboard());
+
+        unlink($temp_file);
+    } else {
+        $message_text = "❌ <b>Decryption Failed</b>\n\n";
+        $message_text .= "📛 <b>Error:</b> " . htmlspecialchars($result['error']) . "\n\n";
+        $message_text .= "Please check your zip file and package name.";
+
+        sendMessage($chat_id, $message_text, mainMenuKeyboard());
+        clearUserState($user_id); // Clear state on failure
+    }
+
+    if (file_exists($zip_path)) {
+        unlink($zip_path);
+    }
+    // On success, state is preserved until the next operation.
+}
+
+function processSettingsEncryptionToChunks($chat_id, $user_id, $json_content, $package_name, $method, $num_chunks) {
+    sendMessage($chat_id, "⏳ <b>Encrypting Settings to " . $num_chunks . " Chunks...</b>\n\nPlease wait.", removeKeyboard());
+
+    $result = encryptSettingsToMD5Chunks($json_content, $package_name, $method, $num_chunks);
+
+    if ($result['success']) {
+        $zip_path = tempnam(sys_get_temp_dir(), 'encrypted_settings_') . '.zip';
+        $zip = new ZipArchive;
+        if ($zip->open($zip_path, ZipArchive::CREATE) !== TRUE) {
+            sendMessage($chat_id, "❌ Error: Could not create the output zip file.", mainMenuKeyboard());
+            clearUserState($user_id);
+            return;
+        }
+
+        foreach ($result['files'] as $filename => $content) {
+            $zip->addFromString('assets/' . $filename, $content);
+        }
+        $zip->close();
+
+        $caption = "✅ <b>Settings Encryption Successful!</b>\n\n";
+        $caption .= "📦 <b>Package:</b> <code>{$package_name}</code>\n";
+        $caption .= "🔑 <b>Method:</b> " . ucfirst($method) . " Key\n";
+        $caption .= "🗂️ <b>Files Created:</b> " . count($result['files']) . "\n\n";
+        $caption .= "Add these files to your APK's <code>assets</code> directory.";
+
+        sendDocument($chat_id, $zip_path, $caption);
+        sendMessage($chat_id, "✨ Ready for next operation!", mainMenuKeyboard());
+
+        unlink($zip_path);
+
+    } else {
+        $message_text = "❌ <b>Encryption Failed</b>\n\n";
+        $message_text .= "📛 <b>Error:</b> " . htmlspecialchars($result['error']) . "\n\n";
+        $message_text .= "Please check your file and try again.";
+
+        sendMessage($chat_id, $message_text, mainMenuKeyboard());
+    }
+
+    clearUserState($user_id);
+}
+
+function processChainedPropertiesEncryption($chat_id, $user_id, $properties_content, $package_name, $timestamp) {
+    sendMessage($chat_id, "⏳ <b>Encrypting Chained Properties...</b>\n\nThis will create 25 encrypted files. Please wait.", removeKeyboard());
+
+    $result = encryptChainedProperties($properties_content, $package_name, $timestamp);
+
+    if ($result['success']) {
+        $zip_path = tempnam(sys_get_temp_dir(), 'chained_props_') . '.zip';
+        $zip = new ZipArchive;
+        if ($zip->open($zip_path, ZipArchive::CREATE) !== TRUE) {
+            sendMessage($chat_id, "❌ Error: Could not create the output zip file.", mainMenuKeyboard());
+            clearUserState($user_id);
+            return;
+        }
+
+        foreach ($result['files'] as $filename => $content) {
+            $zip->addFromString('assets/' . $filename, $content);
+        }
+        $zip->close();
+
+        $caption = "✅ <b>Chained Properties Encryption Successful!</b>\n\n";
+        $caption .= "📦 <b>Package:</b> <code>{$package_name}</code>\n";
+        $caption .= "🕐 <b>Timestamp:</b> <code>{$timestamp}</code>\n";
+        $caption .= "🗂️ <b>Files Created:</b> " . count($result['files']) . "\n\n";
+        $caption .= "Add these files to your APK's <code>assets</code> directory.";
+
+        sendDocument($chat_id, $zip_path, $caption);
+        sendMessage($chat_id, "✨ Ready for next operation!", mainMenuKeyboard());
+
+        unlink($zip_path);
+
+    } else {
+        $message_text = "❌ <b>Encryption Failed</b>\n\n";
+        $message_text .= "📛 <b>Error:</b> " . htmlspecialchars($result['error']) . "\n\n";
+        $message_text .= "Please check your file and try again.";
+
+        sendMessage($chat_id, $message_text, mainMenuKeyboard());
+    }
+
+    clearUserState($user_id);
+}
+
 // ===== MAIN BOT LOGIC =====
 try {
     $update = json_decode(file_get_contents('php://input'), true);
@@ -430,14 +917,23 @@ try {
     }
     
     $message = $update['message'] ?? null;
-    if (!$message) {
-        exit('no message');
+    $callback_query = $update['callback_query'] ?? null;
+
+    if (!$message && !$callback_query) {
+        exit('no message or callback');
     }
-    
-    $chat_id = $message['chat']['id'];
-    $user_id = $message['from']['id'];
-    $text = $message['text'] ?? '';
-    $document = $message['document'] ?? null;
+
+    if ($callback_query) {
+        $chat_id = $callback_query['message']['chat']['id'];
+        $user_id = $callback_query['from']['id'];
+        $data = $callback_query['data'];
+        $text = ''; // No text for callbacks
+    } else {
+        $chat_id = $message['chat']['id'];
+        $user_id = $message['from']['id'];
+        $text = $message['text'] ?? '';
+        $document = $message['document'] ?? null;
+    }
     
     $user_state = getUserState($user_id);
     $state = $user_state['state'] ?? 'idle';
@@ -468,6 +964,12 @@ try {
         $message_text .= "2. Upload encrypted cloneSettings.json\n";
         $message_text .= "3. Enter package name (e.g., com.whatsapp)\n";
         $message_text .= "4. Download decrypted JSON\n\n";
+
+        $message_text .= "<b>🔓 DECRYPT SETTINGS (Chunks):</b>\n";
+        $message_text .= "1. Click 'Decrypt Settings (Chunks)'\n";
+        $message_text .= "2. Upload a <code>.zip</code> file containing the encrypted chunks (e.g., config.bin).\n";
+        $message_text .= "3. Enter the clone's package name.\n";
+        $message_text .= "4. Download the decrypted cloneSettings.json file.\n\n";
         
         $message_text .= "<b>🔒 ENCRYPT SETTINGS:</b>\n";
         $message_text .= "1. Click 'Encrypt Settings'\n";
@@ -480,6 +982,20 @@ try {
         $message_text .= "2. Upload appcloner.dat file (from APK assets)\n";
         $message_text .= "3. Enter clone_timestamp from AndroidManifest.xml\n";
         $message_text .= "4. Download decrypted DEX file\n\n";
+
+        $message_text .= "<b>🔓 DECRYPT CHAINED PROPS:</b>\n";
+        $message_text .= "1. Click 'Decrypt Chained Props'\n";
+        $message_text .= "2. Upload a <code>.zip</code> file containing the encrypted property chunks.\n";
+        $message_text .= "3. Enter the clone's package name\n";
+        $message_text .= "4. Enter the clone_timestamp\n";
+        $message_text .= "5. Download the decrypted .properties file\n\n";
+
+        $message_text .= "<b>🔒 ENCRYPT CHAINED PROPS:</b>\n";
+        $message_text .= "1. Click 'Encrypt Chained Props'\n";
+        $message_text .= "2. Upload your .properties file\n";
+        $message_text .= "3. Enter the clone's package name\n";
+        $message_text .= "4. Enter the clone_timestamp\n";
+        $message_text .= "5. Download a zip file with the encrypted chunks\n\n";
         
         $message_text .= "<b>Finding clone_timestamp:</b>\n";
         $message_text .= "• Decompile APK with apktool\n";
@@ -504,7 +1020,7 @@ try {
     }
     
     // Handle "Decrypt Settings" button
-    if ($text === '🔓 Decrypt Settings') {
+    if ($text === '🔓 Decrypt Settings (Legacy)') {
         clearUserState($user_id);
         setUserState($user_id, ['state' => 'awaiting_file_decrypt_settings']);
         
@@ -513,6 +1029,32 @@ try {
         $message_text .= "The file should contain Base64-encoded encrypted data.\n\n";
         $message_text .= "Send /cancel to abort.";
         
+        sendMessage($chat_id, $message_text, removeKeyboard());
+        exit('ok');
+    }
+
+    // Handle "Decrypt Settings (Chunks)" button
+    if ($text === '🔓 Decrypt Settings (Chunks)') {
+        clearUserState($user_id);
+        setUserState($user_id, ['state' => 'awaiting_zip_decrypt_settings_chunks']);
+
+        $message_text = "📤 <b>Upload ZIP File</b>\n\n";
+        $message_text .= "Please upload a <code>.zip</code> file containing your encrypted setting chunks (e.g., config.bin or MD5-named files).\n\n";
+        $message_text .= "Send /cancel to abort.";
+
+        sendMessage($chat_id, $message_text, removeKeyboard());
+        exit('ok');
+    }
+
+    // Handle "Encrypt Settings (to Chunks)" button
+    if ($text === '🔒 Encrypt Settings (to Chunks)') {
+        clearUserState($user_id);
+        setUserState($user_id, ['state' => 'awaiting_file_encrypt_settings_chunks']);
+
+        $message_text = "📤 <b>Upload JSON File</b>\n\n";
+        $message_text .= "Please upload your decrypted <code>cloneSettings.json</code> file.\n\n";
+        $message_text .= "Send /cancel to abort.";
+
         sendMessage($chat_id, $message_text, removeKeyboard());
         exit('ok');
     }
@@ -541,6 +1083,32 @@ try {
         $message_text .= "📍 <b>Location:</b> <code>assets/appcloner.dat</code>\n\n";
         $message_text .= "Send /cancel to abort.";
         
+        sendMessage($chat_id, $message_text, removeKeyboard());
+        exit('ok');
+    }
+
+    // Handle "Decrypt Chained Props" button
+    if ($text === '🔓 Decrypt Chained Props') {
+        clearUserState($user_id);
+        setUserState($user_id, ['state' => 'awaiting_zip_decrypt_chained']);
+
+        $message_text = "📤 <b>Upload ZIP File</b>\n\n";
+        $message_text .= "Please upload a <code>.zip</code> file containing the encrypted property chunks.\n\n";
+        $message_text .= "Send /cancel to abort.";
+
+        sendMessage($chat_id, $message_text, removeKeyboard());
+        exit('ok');
+    }
+
+    // Handle "Encrypt Chained Props" button
+    if ($text === '🔒 Encrypt Chained Props') {
+        clearUserState($user_id);
+        setUserState($user_id, ['state' => 'awaiting_props_file_encrypt_chained']);
+
+        $message_text = "📤 <b>Upload .properties File</b>\n\n";
+        $message_text .= "Please upload your <code>.properties</code> file to encrypt.\n\n";
+        $message_text .= "Send /cancel to abort.";
+
         sendMessage($chat_id, $message_text, removeKeyboard());
         exit('ok');
     }
@@ -687,26 +1255,110 @@ try {
             clearUserState($user_id);
         }
     }
+    // Handle ZIP file upload for chained properties decryption
+    elseif ($state === 'awaiting_zip_decrypt_chained' && $document) {
+        try {
+            if ($document['mime_type'] !== 'application/zip') {
+                sendMessage($chat_id, "⚠️ <b>Invalid File Type</b>\n\nPlease upload a valid <code>.zip</code> file.", mainMenuKeyboard());
+                clearUserState($user_id);
+                exit('ok');
+            }
+
+            sendMessage($chat_id, "⏳ Downloading ZIP file...", removeKeyboard());
+
+            $file_content = downloadFile($document['file_id']);
+            $temp_zip_path = tempnam(sys_get_temp_dir(), 'user_zip_') . '.zip';
+            file_put_contents($temp_zip_path, $file_content);
+
+            setUserState($user_id, [
+                'state' => 'awaiting_package_decrypt_chained',
+                'zip_path' => $temp_zip_path
+            ]);
+
+            $message_text = "✅ <b>ZIP received!</b>\n\n";
+            $message_text .= "📦 Now enter the <b>package name</b> of the cloned app.\n\n";
+            $message_text .= "<b>Examples:</b>\n";
+            $message_text .= "• <code>com.whatsapp.clone</code>\n";
+            $message_text .= "• <code>com.instagram.android.clone</code>\n\n";
+            $message_text .= "⚠️ This must be the exact package name of the CLONE.";
+
+            sendMessage($chat_id, $message_text, removeKeyboard());
+
+        } catch (Exception $e) {
+            sendMessage($chat_id, "❌ <b>Error processing file:</b>\n\n" . htmlspecialchars($e->getMessage()), mainMenuKeyboard());
+            clearUserState($user_id);
+        }
+    }
+    // Handle ZIP file upload for settings chunks decryption
+    elseif ($state === 'awaiting_zip_decrypt_settings_chunks' && $document) {
+        try {
+            if ($document['mime_type'] !== 'application/zip') {
+                sendMessage($chat_id, "⚠️ <b>Invalid File Type</b>\n\nPlease upload a valid <code>.zip</code> file.", mainMenuKeyboard());
+                clearUserState($user_id);
+                exit('ok');
+            }
+            sendMessage($chat_id, "⏳ Downloading ZIP file...", removeKeyboard());
+            $file_content = downloadFile($document['file_id']);
+            $temp_zip_path = tempnam(sys_get_temp_dir(), 'user_settings_zip_') . '.zip';
+            file_put_contents($temp_zip_path, $file_content);
+            setUserState($user_id, [
+                'state' => 'awaiting_package_decrypt_settings_chunks',
+                'zip_path' => $temp_zip_path
+            ]);
+            $message_text = "✅ <b>ZIP received!</b>\n\n";
+            $message_text .= "📦 Now enter the <b>package name</b> of the cloned app.";
+            sendMessage($chat_id, $message_text, removeKeyboard());
+        } catch (Exception $e) {
+            sendMessage($chat_id, "❌ <b>Error processing file:</b>\n\n" . htmlspecialchars($e->getMessage()), mainMenuKeyboard());
+            clearUserState($user_id);
+        }
+    }
+    // Handle file upload for settings chunks encryption
+    elseif ($state === 'awaiting_file_encrypt_settings_chunks' && $document) {
+        try {
+            sendMessage($chat_id, "⏳ Downloading JSON file...", removeKeyboard());
+            $file_content = downloadFile($document['file_id']);
+            if (!is_valid_json($file_content)) {
+                sendMessage($chat_id, "❌ <b>Invalid JSON File</b>\n\nThe file you uploaded does not contain valid JSON. Please try again.", mainMenuKeyboard());
+                clearUserState($user_id);
+                exit('ok');
+            }
+            setUserState($user_id, [
+                'state' => 'awaiting_package_encrypt_settings_chunks',
+                'json_content' => $file_content
+            ]);
+            $message_text = "✅ <b>JSON file received!</b>\n\n";
+            $message_text .= "📦 Now enter the <b>package name</b> for the clone.";
+            sendMessage($chat_id, $message_text, removeKeyboard());
+        } catch (Exception $e) {
+            sendMessage($chat_id, "❌ <b>Error processing file:</b>\n\n" . htmlspecialchars($e->getMessage()), mainMenuKeyboard());
+            clearUserState($user_id);
+        }
+    }
+    // Handle props file upload for chained properties encryption
+    elseif ($state === 'awaiting_props_file_encrypt_chained' && $document) {
+        try {
+            sendMessage($chat_id, "⏳ Downloading properties file...", removeKeyboard());
+            $file_content = downloadFile($document['file_id']);
+            setUserState($user_id, [
+                'state' => 'awaiting_package_encrypt_chained',
+                'props_content' => $file_content
+            ]);
+            $message_text = "✅ <b>File received!</b>\n\n";
+            $message_text .= "📦 Now enter the <b>package name</b> for the clone.\n\n";
+            $message_text .= "⚠️ This must be the exact package name you intend to use.";
+            sendMessage($chat_id, $message_text, removeKeyboard());
+        } catch (Exception $e) {
+            sendMessage($chat_id, "❌ <b>Error processing file:</b>\n\n" . htmlspecialchars($e->getMessage()), mainMenuKeyboard());
+            clearUserState($user_id);
+        }
+    }
     // Handle package name input for settings decryption
     elseif ($state === 'awaiting_package_decrypt_settings') {
         $package = trim($text);
         
-        // Validate package name
-        if (strlen($package) < 3) {
-            $message_text = "❌ <b>Package name too short</b>\n\n";
-            $message_text .= "Minimum 3 characters required.\n\n";
-            $message_text .= "Please enter a valid package name:";
-            sendMessage($chat_id, $message_text);
-        } 
-        elseif (!preg_match('/^[a-zA-Z0-9._]+$/', $package)) {
-            $message_text = "❌ <b>Invalid package name format</b>\n\n";
-            $message_text .= "Package names can only contain:\n";
-            $message_text .= "• Letters (a-z, A-Z)\n";
-            $message_text .= "• Numbers (0-9)\n";
-            $message_text .= "• Dots (.)\n";
-            $message_text .= "• Underscores (_)\n\n";
-            $message_text .= "Please try again:";
-            sendMessage($chat_id, $message_text);
+        if (strlen($package) < 3 || !preg_match('/^[a-zA-Z0-9._]+$/', $package)) {
+            sendMessage($chat_id, "❌ <b>Invalid package name format.</b> Please try again.");
         } 
         else {
             $encrypted_content = $user_state['encrypted_content'] ?? '';
@@ -722,22 +1374,8 @@ try {
     elseif ($state === 'awaiting_package_encrypt_settings') {
         $package = trim($text);
         
-        // Validate package name
-        if (strlen($package) < 3) {
-            $message_text = "❌ <b>Package name too short</b>\n\n";
-            $message_text .= "Minimum 3 characters required.\n\n";
-            $message_text .= "Please enter a valid package name:";
-            sendMessage($chat_id, $message_text);
-        } 
-        elseif (!preg_match('/^[a-zA-Z0-9._]+$/', $package)) {
-            $message_text = "❌ <b>Invalid package name format</b>\n\n";
-            $message_text .= "Package names can only contain:\n";
-            $message_text .= "• Letters (a-z, A-Z)\n";
-            $message_text .= "• Numbers (0-9)\n";
-            $message_text .= "• Dots (.)\n";
-            $message_text .= "• Underscores (_)\n\n";
-            $message_text .= "Please try again:";
-            sendMessage($chat_id, $message_text);
+        if (strlen($package) < 3 || !preg_match('/^[a-zA-Z0-9._]+$/', $package)) {
+            sendMessage($chat_id, "❌ <b>Invalid package name format.</b> Please try again.");
         } 
         else {
             $json_content = $user_state['json_content'] ?? '';
@@ -753,16 +1391,8 @@ try {
     elseif ($state === 'awaiting_timestamp_appcloner') {
         $timestamp = trim($text);
         
-        // Basic validation
-        if (empty($timestamp)) {
-            $message_text = "❌ <b>Timestamp cannot be empty</b>\n\n";
-            $message_text .= "Please enter the clone_timestamp:";
-            sendMessage($chat_id, $message_text);
-        }
-        elseif (strlen($timestamp) < 5) {
-            $message_text = "❌ <b>Timestamp too short</b>\n\n";
-            $message_text .= "Please enter a valid timestamp value.";
-            sendMessage($chat_id, $message_text);
+        if (empty($timestamp) || !is_numeric($timestamp)) {
+            sendMessage($chat_id, "❌ <b>Invalid timestamp.</b> It must be a number. Please try again.");
         }
         else {
             $encrypted_content = $user_state['encrypted_content'] ?? '';
@@ -770,6 +1400,156 @@ try {
                 processAppClonerDecryption($chat_id, $user_id, $encrypted_content, $timestamp);
             } else {
                 sendMessage($chat_id, "❌ Error: No file data found. Please /start and upload again.", mainMenuKeyboard());
+                clearUserState($user_id);
+            }
+        }
+    }
+    // Handle package name for chained props
+    elseif ($state === 'awaiting_package_decrypt_chained') {
+        $package = trim($text);
+        if (strlen($package) < 3 || !preg_match('/^[a-zA-Z0-9._]+$/', $package)) {
+            sendMessage($chat_id, "❌ <b>Invalid package name format.</b> Please try again.");
+        } else {
+            $user_state['state'] = 'awaiting_timestamp_decrypt_chained';
+            $user_state['package_name'] = $package;
+            setUserState($user_id, $user_state);
+
+            $message_text = "✅ <b>Package name set!</b>\n\n";
+            $message_text .= "🕐 Now enter the <b>clone_timestamp</b>.\n\n";
+            $message_text .= "You can find this in the cloned APK's <code>AndroidManifest.xml</code> under the key <code>com.applisto.appcloner.cloneTimestamp</code>.";
+            sendMessage($chat_id, $message_text, removeKeyboard());
+        }
+    }
+    // Handle timestamp for chained props and process
+    elseif ($state === 'awaiting_timestamp_decrypt_chained') {
+        $timestamp = trim($text);
+        if (empty($timestamp) || !is_numeric($timestamp)) {
+            sendMessage($chat_id, "❌ <b>Invalid timestamp.</b> It must be a number. Please try again.");
+        } else {
+            $zip_path = $user_state['zip_path'] ?? '';
+            $package_name = $user_state['package_name'] ?? '';
+
+            if (file_exists($zip_path) && !empty($package_name)) {
+                processChainedPropertiesDecryption($chat_id, $user_id, $zip_path, $package_name, $timestamp);
+            } else {
+                sendMessage($chat_id, "❌ Error: Missing ZIP file or package name. Please /start over.", mainMenuKeyboard());
+                if(isset($user_state['zip_path']) && file_exists($user_state['zip_path'])) {
+                    unlink($user_state['zip_path']);
+                }
+                clearUserState($user_id);
+            }
+        }
+    }
+    // Handle package name for settings chunks decryption
+    elseif ($state === 'awaiting_package_decrypt_settings_chunks') {
+        $package = trim($text);
+        if (strlen($package) < 3 || !preg_match('/^[a-zA-Z0-9._]+$/', $package)) {
+            sendMessage($chat_id, "❌ <b>Invalid package name format.</b> Please try again.");
+        } else {
+            $zip_path = $user_state['zip_path'] ?? '';
+            if (file_exists($zip_path)) {
+                processSettingsDecryptionFromChunks($chat_id, $user_id, $zip_path, $package);
+            } else {
+                sendMessage($chat_id, "❌ Error: Missing ZIP file. Please /start over.", mainMenuKeyboard());
+                clearUserState($user_id);
+            }
+        }
+    }
+    // Handle package name for settings chunks encryption
+    elseif ($state === 'awaiting_package_encrypt_settings_chunks') {
+        $package = trim($text);
+        if (strlen($package) < 3 || !preg_match('/^[a-zA-Z0-9._]+$/', $package)) {
+            sendMessage($chat_id, "❌ <b>Invalid package name format.</b> Please try again.");
+        } else {
+            $user_state['package_name'] = $package;
+
+            // Check if chunk count is already saved
+            if (isset($user_state['last_settings_chunk_count'])) {
+                $user_state['state'] = 'awaiting_method_encrypt_settings_chunks';
+                setUserState($user_id, $user_state);
+                $message_text = "✅ <b>Package name set!</b>\n\n";
+                $message_text .= "ℹ️ Using saved chunk count: <b>" . $user_state['last_settings_chunk_count'] . "</b>.\n\n";
+                $message_text .= "🔑 Now choose the encryption key method:";
+                 $keyboard = json_encode([
+                    'inline_keyboard' => [
+                        [['text' => 'Dynamic Key (Recommended)', 'callback_data' => 'encrypt_settings_dynamic']],
+                        [['text' => 'Fixed Key (Legacy)', 'callback_data' => 'encrypt_settings_fixed']]
+                    ]
+                ]);
+                sendMessage($chat_id, $message_text, $keyboard);
+            } else {
+                $user_state['state'] = 'awaiting_chunk_count_encrypt_settings';
+                setUserState($user_id, $user_state);
+                $message_text = "✅ <b>Package name set!</b>\n\n";
+                $message_text .= "🔢 Enter the desired number of encrypted chunks to create (e.g., 1, 5, 25).";
+                sendMessage($chat_id, $message_text, removeKeyboard());
+            }
+        }
+    }
+    // Handle chunk count input
+    elseif ($state === 'awaiting_chunk_count_encrypt_settings') {
+        $num_chunks = intval(trim($text));
+        if ($num_chunks > 0) {
+            $user_state['state'] = 'awaiting_method_encrypt_settings_chunks';
+            $user_state['last_settings_chunk_count'] = $num_chunks;
+            setUserState($user_id, $user_state);
+
+            $message_text = "✅ Chunk count set to <b>{$num_chunks}</b>.\n\n";
+            $message_text .= "🔑 Now choose the encryption key method:";
+            $keyboard = json_encode([
+                'inline_keyboard' => [
+                    [['text' => 'Dynamic Key (Recommended)', 'callback_data' => 'encrypt_settings_dynamic']],
+                    [['text' => 'Fixed Key (Legacy)', 'callback_data' => 'encrypt_settings_fixed']]
+                ]
+            ]);
+            sendMessage($chat_id, $message_text, $keyboard);
+        } else {
+            sendMessage($chat_id, "❌ Invalid number. Please enter a positive number for the chunk count.");
+        }
+    }
+    // Handle method selection for settings chunk encryption
+    elseif ($state === 'awaiting_method_encrypt_settings_chunks' && $callback_query) {
+        $method = (str_contains($data, 'dynamic')) ? 'dynamic' : 'fixed';
+
+        $json_content = $user_state['json_content'] ?? '';
+        $package_name = $user_state['package_name'] ?? '';
+        $num_chunks = $user_state['last_settings_chunk_count'] ?? 1;
+
+        if (!empty($json_content) && !empty($package_name)) {
+            processSettingsEncryptionToChunks($chat_id, $user_id, $json_content, $package_name, $method, $num_chunks);
+        } else {
+            sendMessage($chat_id, "❌ Error: Missing JSON content or package name. Please /start over.", mainMenuKeyboard());
+            clearUserState($user_id);
+        }
+    }
+    // Handle package name for chained props encryption
+    elseif ($state === 'awaiting_package_encrypt_chained') {
+        $package = trim($text);
+        if (strlen($package) < 3 || !preg_match('/^[a-zA-Z0-9._]+$/', $package)) {
+            sendMessage($chat_id, "❌ <b>Invalid package name format.</b> Please try again.");
+        } else {
+            $user_state['state'] = 'awaiting_timestamp_encrypt_chained';
+            $user_state['package_name'] = $package;
+            setUserState($user_id, $user_state);
+
+            $message_text = "✅ <b>Package name set!</b>\n\n";
+            $message_text .= "🕐 Now enter the <b>clone_timestamp</b>.\n\n";
+            sendMessage($chat_id, $message_text, removeKeyboard());
+        }
+    }
+    // Handle timestamp for chained props encryption and process
+    elseif ($state === 'awaiting_timestamp_encrypt_chained') {
+        $timestamp = trim($text);
+        if (empty($timestamp) || !is_numeric($timestamp)) {
+            sendMessage($chat_id, "❌ <b>Invalid timestamp.</b> It must be a number. Please try again.");
+        } else {
+            $props_content = $user_state['props_content'] ?? '';
+            $package_name = $user_state['package_name'] ?? '';
+
+            if (!empty($props_content) && !empty($package_name)) {
+                processChainedPropertiesEncryption($chat_id, $user_id, $props_content, $package_name, $timestamp);
+            } else {
+                sendMessage($chat_id, "❌ Error: Missing properties file or package name. Please /start over.", mainMenuKeyboard());
                 clearUserState($user_id);
             }
         }

@@ -1,12 +1,14 @@
 # PHP Telegram Bot for App Cloner
 
-This is a powerful PHP-based Telegram bot designed to help developers and power users work with App Cloner files. It provides a simple, interactive interface to encrypt and decrypt `cloneSettings.json` and decrypt `appcloner.dat` files directly within Telegram.
+This is a powerful PHP-based Telegram bot designed to help developers and power users work with App Cloner files. It provides a simple, interactive interface to encrypt and decrypt `cloneSettings.json`, decrypt `appcloner.dat` files, and manage **Chained Properties** directly within Telegram.
 
 ## Features
 
 - **Decrypt `cloneSettings.json`**: Easily decrypt your `cloneSettings.json` files by providing the encrypted file and the corresponding package name.
 - **Encrypt `cloneSettings.json`**: Encrypt a plain JSON settings file back into the App Cloner format.
 - **Decrypt `appcloner.dat`**: Decrypt the `appcloner.dat` file (located in the APK's `assets` folder) to retrieve the underlying DEX file.
+- **Decrypt Chained Properties**: Decrypts the chained `.properties` files from a cloned APK.
+- **Encrypt Chained Properties**: Encrypts a `.properties` file into 25 chained files, ready to be added to an APK.
 - **Stateful & Interactive**: The bot guides you through each step of the process.
 - **Error Handling**: Provides clear instructions and help for common issues (e.g., wrong package name, incorrect timestamp).
 - **Secure**: No user data or files are stored permanently. All operations are performed in memory, and temporary files are deleted immediately.
@@ -37,18 +39,46 @@ Once the bot is running, you can start interacting with it in your Telegram clie
 
 ### Main Menu
 
-After sending `/start`, you will see the main menu with three options:
+After sending `/start`, you will see the main menu with several options:
 
--   `🔓 Decrypt Settings`
+-   `🔓 Decrypt Settings (Legacy)`
+-   `🔓 Decrypt Settings (Chunks)`
+-   `🔒 Encrypt Settings (to Chunks)`
 -   `🔒 Encrypt Settings`
 -   `📦 Decrypt AppCloner.dat`
+-   `🔓 Decrypt Chained Props`
+-   `🔒 Encrypt Chained Props`
 
-### Decrypting `cloneSettings.json`
+### Decrypting Settings (from Chunks)
 
-1.  Press **🔓 Decrypt Settings**.
+This is the recommended method for decrypting `cloneSettings.json`. It works by assembling encrypted chunks from a `.zip` file. When you use this feature, the bot automatically saves the number of chunks it found.
+
+1.  Press **🔓 Decrypt Settings (Chunks)**.
+2.  Upload a `.zip` file containing the encrypted chunks (e.g., `config.bin` or files with MD5-style names).
+3.  Provide the app's **package name**.
+4.  The bot will find the files, assemble them, and try to decrypt them with both dynamic and fixed keys.
+5.  It will send back the decrypted `cloneSettings.json` file and notify you that the chunk count has been saved.
+
+### Decrypting Settings (Legacy)
+
+This method is for decrypting a single, already-assembled `cloneSettings.json` file.
+
+1.  Press **🔓 Decrypt Settings (Legacy)**.
 2.  The bot will ask you to upload your encrypted `cloneSettings.json` file.
-3.  After uploading, the bot will ask for the app's **package name** (e.g., `com.whatsapp`). This is case-sensitive.
+3.  After uploading, the bot will ask for the app's **package name**.
 4.  If the package name is correct, the bot will send back the decrypted and formatted `.json` file.
+
+### Encrypting Settings (to Chunks)
+
+This encrypts a `cloneSettings.json` file and splits it into a specific number of MD5-named chunk files.
+
+1.  Press **🔒 Encrypt Settings (to Chunks)**.
+2.  Upload your decrypted `cloneSettings.json` file.
+3.  Provide the app's **package name**.
+4.  The bot will then ask for the number of chunks to create.
+    -   **Note:** If you have just decrypted settings, the bot will automatically use the chunk count it found, skipping this step.
+5.  Choose the encryption method: **Dynamic** (recommended) or **Fixed** (for legacy use).
+6.  The bot will send back a `.zip` file containing the encrypted chunk files for the `assets` directory.
 
 ### Encrypting `cloneSettings.json`
 
@@ -63,22 +93,43 @@ After sending `/start`, you will see the main menu with three options:
 2.  The bot will ask you to upload the `appcloner.dat` file from your cloned APK's `assets` folder.
 3.  After uploading, the bot will ask for the `clone_timestamp`.
 
-    **How to find the `clone_timestamp`**:
-    -   Decompile the cloned APK using a tool like `apktool`.
-    -   Open the `AndroidManifest.xml` file.
-    -   Search for the following meta-data tag:
-        ```xml
-        <meta-data android:name="com.applisto.appcloner.cloneTimestamp" android:value="1234567890123" />
-        ```
-    -   Copy the `android:value`. This is your timestamp.
+### Decrypting Chained Properties
 
-4.  Provide the timestamp to the bot. It will decrypt the file and send you the `decrypted_classes.dex` file.
+This feature allows you to decrypt the string properties that are stored in a chain of encrypted files.
+
+1.  Press **🔓 Decrypt Chained Props**.
+2.  The bot will ask you to upload a **`.zip` file** containing the encrypted property chunks.
+3.  After uploading, provide the clone's **package name**.
+4.  Finally, enter the **`clone_timestamp`**.
+5.  The bot will process the zip file, find and decrypt all chained files, and send you a single, combined `.properties` file.
+
+### Encrypting Chained Properties
+
+This feature takes a single `.properties` file and encrypts it into the 25 chained files that App Cloner uses.
+
+1.  Press **🔒 Encrypt Chained Props**.
+2.  The bot will ask you to upload your `.properties` file.
+3.  After uploading, provide the **package name** for the clone.
+4.  Finally, enter the **`clone_timestamp`**.
+5.  The bot will encrypt your properties into 25 files and send them back as a `.zip` archive. You can then place these files into the `assets` folder of your APK.
+
+### How to find the `clone_timestamp`
+
+This value is required for most decryption/encryption processes.
+-   Decompile the cloned APK using a tool like `apktool`.
+-   Open the `AndroidManifest.xml` file.
+-   Search for the following meta-data tag:
+    ```xml
+    <meta-data android:name="com.applisto.appcloner.cloneTimestamp" android:value="1234567890123" />
+    ```
+-   Copy the `android:value`. This is your timestamp.
 
 ## Dependencies
 
 -   PHP 7.0+
 -   `php-curl` extension
 -   `php-openssl` extension
+-   `php-zip` extension (for creating zip archives)
 
 ---
 *This bot is intended for educational and development purposes. Use it responsibly.*
