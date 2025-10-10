@@ -75,7 +75,8 @@ function sendDocument($chat_id, $file_path, $caption = '') {
     $data = [
         'chat_id' => $chat_id,
         'document' => new CURLFile($file_path),
-        'caption' => $caption
+        'caption' => $caption,
+        'parse_mode' => 'HTML'
     ];
     
     $ch = curl_init(API_URL . '/sendDocument');
