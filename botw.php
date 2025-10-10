@@ -419,10 +419,13 @@ function is_valid_json($string) {
     return (json_last_error() == JSON_ERROR_NONE);
 }
 
-function encryptSettingsToMD5Chunks($json_content, $package_name, $method) {
+function encryptSettingsToMD5Chunks($json_content, $package_name, $method, $num_chunks = 1) {
     try {
         if (!is_valid_json($json_content)) {
             throw new Exception("Invalid JSON content provided.");
+        }
+        if ($num_chunks < 1) {
+            throw new Exception("Number of chunks must be at least 1.");
         }
 
         $key = null;
@@ -441,13 +444,20 @@ function encryptSettingsToMD5Chunks($json_content, $package_name, $method) {
         }
 
         $encrypted_base64 = base64_encode($encrypted_bytes);
+        $total_len = strlen($encrypted_base64);
 
-        // Split the base64 string into chunks and generate filenames
-        $chunks = str_split($encrypted_base64, 1024); // 1KB chunks
+        // Split the base64 string into a specific number of chunks
+        $base_chunk_size = floor($total_len / $num_chunks);
+        $remainder = $total_len % $num_chunks;
         $files = [];
-        foreach ($chunks as $index => $chunk_content) {
-            $filename = generateSettingsFilename($package_name, $index);
+        $offset = 0;
+
+        for ($i = 0; $i < $num_chunks; $i++) {
+            $chunk_size = $base_chunk_size + ($i < $remainder ? 1 : 0);
+            $chunk_content = substr($encrypted_base64, $offset, $chunk_size);
+            $filename = generateSettingsFilename($package_name, $i);
             $files[$filename] = $chunk_content;
+            $offset += $chunk_size;
         }
 
         return ['success' => true, 'files' => $files];
@@ -778,6 +788,11 @@ function processSettingsDecryptionFromChunks($chat_id, $user_id, $zip_path, $pac
     $result = decryptCloneSettingsFromChunks($zip_path, $package_name);
 
     if ($result['success']) {
+        // Save the chunk count for the next encryption
+        $user_state = getUserState($user_id);
+        $user_state['last_settings_chunk_count'] = $result['file_count'];
+        setUserState($user_id, $user_state);
+
         $temp_file = tempnam(sys_get_temp_dir(), 'decrypted_settings_') . '.json';
 
         // Format JSON nicely
@@ -787,8 +802,9 @@ function processSettingsDecryptionFromChunks($chat_id, $user_id, $zip_path, $pac
 
         $message_text = "✅ <b>Settings Decryption Successful!</b>\n\n";
         $message_text .= "📦 <b>Package:</b> <code>{$package_name}</code>\n";
-        $message_text .= "🔑 <b>Decryption Method:</b> " . ucfirst($result['method']) . " Key\n";
-        $message_text .= "🗂️ <b>Files Assembled:</b> " . $result['file_count'] . "\n";
+        $message_text .= "🔑 <b>Method:</b> " . ucfirst($result['method']) . " Key\n";
+        $message_text .= "🗂️ <b>Files Assembled:</b> " . $result['file_count'] . "\n\n";
+        $message_text .= "ℹ️ The chunk count (<b>" . $result['file_count'] . "</b>) has been saved for your next encryption operation.";
 
         sendDocument($chat_id, $temp_file, $message_text);
         sendMessage($chat_id, "✨ Ready for next operation!", mainMenuKeyboard());
@@ -800,18 +816,19 @@ function processSettingsDecryptionFromChunks($chat_id, $user_id, $zip_path, $pac
         $message_text .= "Please check your zip file and package name.";
 
         sendMessage($chat_id, $message_text, mainMenuKeyboard());
+        clearUserState($user_id); // Clear state on failure
     }
 
     if (file_exists($zip_path)) {
         unlink($zip_path);
     }
-    clearUserState($user_id);
+    // On success, state is preserved until the next operation.
 }
 
-function processSettingsEncryptionToChunks($chat_id, $user_id, $json_content, $package_name, $method) {
-    sendMessage($chat_id, "⏳ <b>Encrypting Settings to Chunks...</b>\n\nPlease wait.", removeKeyboard());
+function processSettingsEncryptionToChunks($chat_id, $user_id, $json_content, $package_name, $method, $num_chunks) {
+    sendMessage($chat_id, "⏳ <b>Encrypting Settings to " . $num_chunks . " Chunks...</b>\n\nPlease wait.", removeKeyboard());
 
-    $result = encryptSettingsToMD5Chunks($json_content, $package_name, $method);
+    $result = encryptSettingsToMD5Chunks($json_content, $package_name, $method, $num_chunks);
 
     if ($result['success']) {
         $zip_path = tempnam(sys_get_temp_dir(), 'encrypted_settings_') . '.zip';
@@ -1443,11 +1460,40 @@ try {
         if (strlen($package) < 3 || !preg_match('/^[a-zA-Z0-9._]+$/', $package)) {
             sendMessage($chat_id, "❌ <b>Invalid package name format.</b> Please try again.");
         } else {
-            $user_state['state'] = 'awaiting_method_encrypt_settings_chunks';
             $user_state['package_name'] = $package;
+
+            // Check if chunk count is already saved
+            if (isset($user_state['last_settings_chunk_count'])) {
+                $user_state['state'] = 'awaiting_method_encrypt_settings_chunks';
+                setUserState($user_id, $user_state);
+                $message_text = "✅ <b>Package name set!</b>\n\n";
+                $message_text .= "ℹ️ Using saved chunk count: <b>" . $user_state['last_settings_chunk_count'] . "</b>.\n\n";
+                $message_text .= "🔑 Now choose the encryption key method:";
+                 $keyboard = json_encode([
+                    'inline_keyboard' => [
+                        [['text' => 'Dynamic Key (Recommended)', 'callback_data' => 'encrypt_settings_dynamic']],
+                        [['text' => 'Fixed Key (Legacy)', 'callback_data' => 'encrypt_settings_fixed']]
+                    ]
+                ]);
+                sendMessage($chat_id, $message_text, $keyboard);
+            } else {
+                $user_state['state'] = 'awaiting_chunk_count_encrypt_settings';
+                setUserState($user_id, $user_state);
+                $message_text = "✅ <b>Package name set!</b>\n\n";
+                $message_text .= "🔢 Enter the desired number of encrypted chunks to create (e.g., 1, 5, 25).";
+                sendMessage($chat_id, $message_text, removeKeyboard());
+            }
+        }
+    }
+    // Handle chunk count input
+    elseif ($state === 'awaiting_chunk_count_encrypt_settings') {
+        $num_chunks = intval(trim($text));
+        if ($num_chunks > 0) {
+            $user_state['state'] = 'awaiting_method_encrypt_settings_chunks';
+            $user_state['last_settings_chunk_count'] = $num_chunks;
             setUserState($user_id, $user_state);
 
-            $message_text = "✅ <b>Package name set!</b>\n\n";
+            $message_text = "✅ Chunk count set to <b>{$num_chunks}</b>.\n\n";
             $message_text .= "🔑 Now choose the encryption key method:";
             $keyboard = json_encode([
                 'inline_keyboard' => [
@@ -1456,6 +1502,8 @@ try {
                 ]
             ]);
             sendMessage($chat_id, $message_text, $keyboard);
+        } else {
+            sendMessage($chat_id, "❌ Invalid number. Please enter a positive number for the chunk count.");
         }
     }
     // Handle method selection for settings chunk encryption
@@ -1464,9 +1512,10 @@ try {
 
         $json_content = $user_state['json_content'] ?? '';
         $package_name = $user_state['package_name'] ?? '';
+        $num_chunks = $user_state['last_settings_chunk_count'] ?? 1;
 
         if (!empty($json_content) && !empty($package_name)) {
-            processSettingsEncryptionToChunks($chat_id, $user_id, $json_content, $package_name, $method);
+            processSettingsEncryptionToChunks($chat_id, $user_id, $json_content, $package_name, $method, $num_chunks);
         } else {
             sendMessage($chat_id, "❌ Error: Missing JSON content or package name. Please /start over.", mainMenuKeyboard());
             clearUserState($user_id);

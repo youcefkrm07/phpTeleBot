@@ -51,12 +51,13 @@ After sending `/start`, you will see the main menu with several options:
 
 ### Decrypting Settings (from Chunks)
 
-This is the recommended method for decrypting `cloneSettings.json`. It works by assembling encrypted chunks from a `.zip` file.
+This is the recommended method for decrypting `cloneSettings.json`. It works by assembling encrypted chunks from a `.zip` file. When you use this feature, the bot automatically saves the number of chunks it found.
 
 1.  Press **🔓 Decrypt Settings (Chunks)**.
 2.  Upload a `.zip` file containing the encrypted chunks (e.g., `config.bin` or files with MD5-style names).
 3.  Provide the app's **package name**.
-4.  The bot will find the files, assemble them, and try to decrypt them with both dynamic and fixed keys, then send back the decrypted `cloneSettings.json` file.
+4.  The bot will find the files, assemble them, and try to decrypt them with both dynamic and fixed keys.
+5.  It will send back the decrypted `cloneSettings.json` file and notify you that the chunk count has been saved.
 
 ### Decrypting Settings (Legacy)
 
@@ -69,13 +70,15 @@ This method is for decrypting a single, already-assembled `cloneSettings.json` f
 
 ### Encrypting Settings (to Chunks)
 
-This encrypts a `cloneSettings.json` file and splits it into multiple MD5-named chunk files, ready to be placed in an APK.
+This encrypts a `cloneSettings.json` file and splits it into a specific number of MD5-named chunk files.
 
 1.  Press **🔒 Encrypt Settings (to Chunks)**.
 2.  Upload your decrypted `cloneSettings.json` file.
 3.  Provide the app's **package name**.
-4.  Choose the encryption method: **Dynamic** (recommended) or **Fixed** (for legacy use).
-5.  The bot will send back a `.zip` file containing the encrypted chunk files for the `assets` directory.
+4.  The bot will then ask for the number of chunks to create.
+    -   **Note:** If you have just decrypted settings, the bot will automatically use the chunk count it found, skipping this step.
+5.  Choose the encryption method: **Dynamic** (recommended) or **Fixed** (for legacy use).
+6.  The bot will send back a `.zip` file containing the encrypted chunk files for the `assets` directory.
 
 ### Encrypting `cloneSettings.json`
 
