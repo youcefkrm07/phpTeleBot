@@ -251,9 +251,8 @@ function deriveAppClonerKey($clone_timestamp) {
         }
         
         $final_key_str = implode('', $key_builder);
-        $final_key_bytes = $final_key_str; // UTF-8 encoded
         
-        return $final_key_bytes;
+        return $final_key_str;
         
     } catch (Exception $e) {
         throw new Exception("Key derivation failed: " . $e->getMessage());
@@ -274,17 +273,10 @@ function decryptAppClonerDat($encrypted_data, $clone_timestamp) {
         // Derive the decryption key
         $key = deriveAppClonerKey($clone_timestamp);
         
-        // Key must be 16, 24, or 32 bytes for AES
-        $key_len = strlen($key);
-        if (!in_array($key_len, [16, 24, 32])) {
-            throw new Exception("Invalid key length: $key_len bytes (expected 16, 24, or 32)");
-        }
-        
-        // Decrypt using AES-ECB with PKCS7 padding
-        $cipher = 'AES-' . ($key_len * 8) . '-ECB';
+        // Decrypt using AES-256-ECB. PHP's openssl_decrypt handles PKCS7 padding by default.
         $decrypted = openssl_decrypt(
             $encrypted_data,
-            $cipher,
+            'aes-256-ecb',
             $key,
             OPENSSL_RAW_DATA
         );
@@ -293,14 +285,9 @@ function decryptAppClonerDat($encrypted_data, $clone_timestamp) {
             throw new Exception("Decryption failed - possibly wrong clone_timestamp or corrupted data");
         }
         
-        // Validate DEX header (magic bytes: "dex\n" or 0x6465780a)
-        if (strlen($decrypted) >= 4) {
-            $magic = substr($decrypted, 0, 4);
-            if ($magic !== "dex\n" && bin2hex($magic) !== '6465780a') {
-                // Try to check for other common file signatures
-                $hex_magic = bin2hex(substr($decrypted, 0, 8));
-                throw new Exception("Decrypted data doesn't appear to be a valid DEX file. Got magic: $hex_magic - wrong timestamp?");
-            }
+        // Validate DEX header
+        if (strlen($decrypted) < 4 || substr($decrypted, 0, 4) !== "dex\n") {
+             throw new Exception("Decrypted data does not appear to be a valid DEX file. Check timestamp.");
         }
         
         return [
