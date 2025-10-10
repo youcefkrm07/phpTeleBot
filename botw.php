@@ -390,11 +390,11 @@ function decryptChainedProperties($zip_path, $package_name, $clone_timestamp) {
             }
 
             $files_processed++;
-            // The key is the raw binary representation of the MD5 hex string.
-            $aes_key = hex2bin($current_key_md5);
+            // The key is the 32-byte hex string itself.
+            $aes_key = $current_key_md5;
 
-            // A 16-byte key (from 32-char hex) requires AES-128.
-            $decrypted_bytes = openssl_decrypt($encrypted_data, 'aes-128-ecb', $aes_key, OPENSSL_RAW_DATA);
+            // A 32-byte key requires AES-256.
+            $decrypted_bytes = openssl_decrypt($encrypted_data, 'aes-256-ecb', $aes_key, OPENSSL_RAW_DATA);
 
             if ($decrypted_bytes === false) {
                  throw new Exception("Decryption failed for resource '{$resource_filename_hash}'. Usually means a wrong package name or timestamp.");
@@ -402,7 +402,7 @@ function decryptChainedProperties($zip_path, $package_name, $clone_timestamp) {
 
             $properties_chunk = parseProperties($decrypted_bytes);
             if (!empty($properties_chunk)) {
-                $all_decrypted_properties = $all_decrypted_properties + $properties_chunk;
+                $all_decrypted_properties = array_merge($all_decrypted_properties, $properties_chunk);
             }
             $current_key_md5 = $resource_filename_hash;
         }
@@ -457,10 +457,10 @@ function encryptChainedProperties($properties_content, $package_name, $clone_tim
 
         foreach ($chunks_of_property_maps as $chunk_map) {
             $plain_text = formatPropertiesMap($chunk_map);
-            // The key is the raw binary representation of the MD5 hex string.
-            $aes_key = hex2bin($current_key_md5);
-            // A 16-byte key (from 32-char hex) requires AES-128.
-            $encrypted_bytes = openssl_encrypt($plain_text, 'aes-128-ecb', $aes_key, OPENSSL_RAW_DATA);
+            // The key is the 32-byte hex string itself.
+            $aes_key = $current_key_md5;
+            // A 32-byte key requires AES-256.
+            $encrypted_bytes = openssl_encrypt($plain_text, 'aes-256-ecb', $aes_key, OPENSSL_RAW_DATA);
 
             if ($encrypted_bytes === false) throw new Exception("Chunk encryption failed.");
 
