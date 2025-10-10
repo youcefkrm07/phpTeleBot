@@ -419,7 +419,7 @@ function is_valid_json($string) {
     return (json_last_error() == JSON_ERROR_NONE);
 }
 
-function encryptCloneSettingsToBin($json_content, $package_name, $method) {
+function encryptSettingsToMD5Chunks($json_content, $package_name, $method) {
     try {
         if (!is_valid_json($json_content)) {
             throw new Exception("Invalid JSON content provided.");
@@ -428,9 +428,9 @@ function encryptCloneSettingsToBin($json_content, $package_name, $method) {
         $key = null;
         if ($method === 'dynamic') {
             $dynamic_key_material = $package_name . SETTINGS_KEY_SUFFIX;
-            $key = md5($dynamic_key_material, true); // 16 bytes raw
+            $key = md5($dynamic_key_material, true);
         } elseif ($method === 'fixed') {
-            $key = SETTINGS_FIXED_KEY; // 16 bytes raw
+            $key = SETTINGS_FIXED_KEY;
         } else {
             throw new Exception("Invalid encryption method specified.");
         }
@@ -442,7 +442,15 @@ function encryptCloneSettingsToBin($json_content, $package_name, $method) {
 
         $encrypted_base64 = base64_encode($encrypted_bytes);
 
-        return ['success' => true, 'data' => $encrypted_base64];
+        // Split the base64 string into chunks and generate filenames
+        $chunks = str_split($encrypted_base64, 1024); // 1KB chunks
+        $files = [];
+        foreach ($chunks as $index => $chunk_content) {
+            $filename = generateSettingsFilename($package_name, $index);
+            $files[$filename] = $chunk_content;
+        }
+
+        return ['success' => true, 'files' => $files];
 
     } catch (Exception $e) {
         return ['success' => false, 'error' => $e->getMessage()];
@@ -803,7 +811,7 @@ function processSettingsDecryptionFromChunks($chat_id, $user_id, $zip_path, $pac
 function processSettingsEncryptionToChunks($chat_id, $user_id, $json_content, $package_name, $method) {
     sendMessage($chat_id, "⏳ <b>Encrypting Settings to Chunks...</b>\n\nPlease wait.", removeKeyboard());
 
-    $result = encryptCloneSettingsToBin($json_content, $package_name, $method);
+    $result = encryptSettingsToMD5Chunks($json_content, $package_name, $method);
 
     if ($result['success']) {
         $zip_path = tempnam(sys_get_temp_dir(), 'encrypted_settings_') . '.zip';
@@ -814,14 +822,16 @@ function processSettingsEncryptionToChunks($chat_id, $user_id, $json_content, $p
             return;
         }
 
-        $zip->addFromString('assets/config.bin', $result['data']);
+        foreach ($result['files'] as $filename => $content) {
+            $zip->addFromString('assets/' . $filename, $content);
+        }
         $zip->close();
 
         $caption = "✅ <b>Settings Encryption Successful!</b>\n\n";
         $caption .= "📦 <b>Package:</b> <code>{$package_name}</code>\n";
         $caption .= "🔑 <b>Method:</b> " . ucfirst($method) . " Key\n";
-        $caption .= "🗂️ <b>File Created:</b> <code>config.bin</code>\n\n";
-        $caption .= "Add this file to your APK's <code>assets</code> directory.";
+        $caption .= "🗂️ <b>Files Created:</b> " . count($result['files']) . "\n\n";
+        $caption .= "Add these files to your APK's <code>assets</code> directory.";
 
         sendDocument($chat_id, $zip_path, $caption);
         sendMessage($chat_id, "✨ Ready for next operation!", mainMenuKeyboard());

@@ -69,13 +69,13 @@ This method is for decrypting a single, already-assembled `cloneSettings.json` f
 
 ### Encrypting Settings (to Chunks)
 
-This encrypts a `cloneSettings.json` file into a `config.bin` file, ready to be zipped and placed in an APK.
+This encrypts a `cloneSettings.json` file and splits it into multiple MD5-named chunk files, ready to be placed in an APK.
 
 1.  Press **🔒 Encrypt Settings (to Chunks)**.
 2.  Upload your decrypted `cloneSettings.json` file.
 3.  Provide the app's **package name**.
 4.  Choose the encryption method: **Dynamic** (recommended) or **Fixed** (for legacy use).
-5.  The bot will send back a `.zip` file containing the encrypted `assets/config.bin`.
+5.  The bot will send back a `.zip` file containing the encrypted chunk files for the `assets` directory.
 
 ### Encrypting `cloneSettings.json`
 
